@@ -303,12 +303,14 @@ fn capture(
             client, capture_id, content, group_id, normalized, sweep, older
         ],
     )?;
+    let mut newest_len = messages.len();
     if sweep.is_some() {
         if end.is_none() {
             return Ok(group_id.into());
         }
-        let (combined, linked) = assemble(db, client, group_id, capture_id)?;
+        let (combined, linked, latest_len) = assemble(db, client, group_id, capture_id)?;
         messages = combined;
+        newest_len = latest_len;
         if !linked {
             end = Some("gap");
         }
@@ -341,7 +343,8 @@ fn capture(
         )?;
         db.execute("DELETE FROM member_snapshots WHERE group_id=?", [group_id])?;
     }
-    commit_window(db, &group, &messages, end, timestamp)?;
+    let newest = &messages[messages.len() - newest_len..];
+    commit_window(db, &group, &messages, newest, end, timestamp)?;
     Ok(group_id.into())
 }
 
@@ -363,7 +366,7 @@ fn assemble(
     client: &str,
     group: &str,
     capture_id: &str,
-) -> Result<(Vec<Message>, bool)> {
+) -> Result<(Vec<Message>, bool, usize)> {
     let mut windows = Vec::new();
     let mut next = Some(capture_id.to_owned());
     while let Some(id) = next {
@@ -373,6 +376,7 @@ fn assemble(
         next = page["older_than"].as_str().map(str::to_owned);
     }
     let newest = windows.pop().unwrap();
+    let newest_len = newest.len();
     let mut prefix: Vec<_> = newest.iter().take(300).cloned().collect();
     let mut parts = VecDeque::from([newest]);
     let mut linked = true;
@@ -386,13 +390,14 @@ fn assemble(
         prefix = older.iter().chain(&prefix).take(300).cloned().collect();
         parts.push_front(older);
     }
-    Ok((parts.into_iter().flatten().collect(), linked))
+    Ok((parts.into_iter().flatten().collect(), linked, newest_len))
 }
 
 fn commit_window(
     db: &Connection,
     group: &Record,
     messages: &[Message],
+    newest: &[Message],
     mut end: Option<&str>,
     timestamp: f64,
 ) -> Result<()> {
@@ -415,6 +420,15 @@ fn commit_window(
                 new = &messages[boundary..];
             } else {
                 end = Some("gap");
+                let boundary = overlap(&head, newest);
+                let anchor = &newest[..boundary];
+                // Older pages can leave a gap even when the newest page continues the stored tail.
+                if boundary > 0
+                    && unique_anchor(&head, anchor) == Some(head.len() - boundary)
+                    && unique_anchor(newest, anchor) == Some(0)
+                {
+                    new = &newest[boundary..];
+                }
             }
         }
         if end == Some("complete") && !oldest.is_empty() {

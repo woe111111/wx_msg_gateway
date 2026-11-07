@@ -360,6 +360,22 @@ class MultiClientTest(unittest.TestCase):
         self.assertEqual([(row["offset"], row["text"]) for row in final], [(i, str(i)) for i in range(3, 9)])
         self.assertEqual(self.request("GET", path, headers=self.web)["history_status"], "complete")
 
+    def test_newest_window_advances_despite_history_gap(self):
+        device = self.register("partial-history")
+        self.approve(device)
+        group = self.capture(device, "known", self.rows([str(i) for i in range(1, 19)]),
+                             history_status="complete")
+        path = f"/v1/clients/partial-history/groups/{group}"
+        newest = self.rows([str(i) for i in range(12, 19)] + ["新入站消息"])
+        older = self.rows(["旧窗口中的未对齐文字", "12"])
+        for attempt in ("first", "repeat"):
+            self.capture(device, attempt, newest, group, sweep_id=attempt)
+            self.capture(device, attempt + "-older", older, group, sweep_id=attempt,
+                         older_than=attempt, history_status="gap")
+            rows = self.request("GET", path+"/messages?after_offset=18&limit=10", headers=self.web)["messages"]
+            self.assertEqual([(row["offset"], row["text"]) for row in rows], [(19, "新入站消息")])
+            self.assertEqual(self.request("GET", path, headers=self.web)["history_status"], "gap")
+
     def test_group_key_permissions_and_web_task_history(self):
         device = self.register("scope-test")
         self.approve(device)
