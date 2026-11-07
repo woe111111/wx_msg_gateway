@@ -97,7 +97,7 @@ curl -fsS -H "Authorization: Bearer ${GATEWAY_API_KEY}" \
   "$GROUP_URL/messages?after_offset=0&limit=100"
 ```
 
-两种消息接口都返回 `messages` 数组。发送人未识别时 `sender` 为 `null`。`observed_at` 是网关观测时间（Unix 秒），`backfilled` 为 `0` 或 `1`。
+两种消息接口都返回 `messages` 数组。发送人未识别时 `sender` 为 `null`。`observed_at` 是网关观测时间（Unix 秒），Web 按浏览器时区显示为「采集时间」。历史补采的消息也使用入库时的观测时间。`backfilled` 为 `0` 或 `1`。
 
 ```json
 {

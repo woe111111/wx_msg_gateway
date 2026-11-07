@@ -91,6 +91,10 @@ const statuses = {queued:"已排队",executing:"手机处理中",confirmed:"手�
 const historyLabels = {pending:"等待历史回补",complete:"已完成历史回补",gap:"采集有缺口"};
 const admissionLabels = {registered:"等待安卓申请",pending:"待审批",approved:"已通过",revoked:"已撤销"};
 const scopeLabels = {"groups:read":"查群","messages:read":"读消息","messages:send":"发消息","members:read":"查群成员"};
+const observedTime = new Intl.DateTimeFormat("zh-CN", {
+  year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",
+  second:"2-digit",hourCycle:"h23",timeZoneName:"short",
+});
 let clients = [], clientId = "", groupId = "", view = "chat", refreshId = 0, attempted = null, submitting = false;
 let replyTarget = null;
 const base = client => "/v1/clients/"+encodeURIComponent(client)+"/groups";
@@ -151,8 +155,14 @@ async function loadChat() {
   messages.replaceChildren(...data.messages.map(message=>{
     const article=item("article","");
     const tag={direct:"@我",all:"@所有人",unknown:"提及状态未知"}[message.mention_self];
-    article.append(item("small",[(message.sender||"发送人未显示"),message.offset,tag].filter(Boolean).join(" · ")),
-      item("p",message.text));
+    const meta=item("small",[(message.sender||"发送人未显示"),message.offset,tag].filter(Boolean).join(" · "));
+    if (Number.isFinite(message.observed_at)) {
+      const date=new Date(message.observed_at*1000);
+      const time=item("time",observedTime.format(date));
+      time.dateTime=date.toISOString();
+      meta.append(" · 采集时间 ",time);
+    }
+    article.append(meta,item("p",message.text));
     if (group.mention_sender_supported && group.routable && message.direction==="incoming" && message.sender) {
       article.append(button("回复并 @",()=>{
         if (path!==groupPath(clientId,groupId)) return;
