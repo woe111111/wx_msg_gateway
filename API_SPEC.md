@@ -1,11 +1,11 @@
-# 群消息网关 v1 需求与三端接口
+# 群消息网关 v1 API
 
-本文定义安卓 APK、Web 管理端和第三方调用端的 v1 接口。启动与测试方式见 [gateway/README.md](gateway/README.md)，手机命令的执行约束见 [PROTOCOL.md](PROTOCOL.md)。
+本文说明当前 Rust 网关提供的安卓设备、Web 管理和第三方业务接口。启动与测试方式见 [gateway/README.md](gateway/README.md)，手机命令的执行约束见 [PROTOCOL.md](PROTOCOL.md)。
 
 ## 共用规则
 
 - 一台网关支持多个安卓客户端同时在线。每台设备登记唯一的 `client_id`，使用各自的注册 Key。网关按 `client_id` 独立管理在线状态、执行会话、群绑定和任务队列。一个 `client_id` 同一时刻只有一个会话可以执行命令，重连时先核对未完成任务再恢复派发。
-- 网关为每个确认过的群分配独立的 `group_id`。查某个群、读消息、发送和查回执都明确指定 `client_id + group_id`。服务端验证绑定，同名群分别识别。
+- 网关为每个确认过的群分配独立的 `group_id`。查某个群、读消息、发送和查回执都明确指定 `client_id + group_id`。服务端校验客户端和群的绑定。不同客户端上的同名群分别编号。同一设备内无法区分的同名群会限制发送。新生成的 `group_id` 是 32 位十六进制字符串，请从群列表取得并按原值使用。
 - 服务器保留每个群全部已采集的文字历史。消息归并后在事务中分配该群的 `offset`，同一 `client_id + group_id` 下按入库顺序递增。重传同一批次或同一条已归并的消息沿用原记录。补采的历史消息获得新的 `offset`。
 - 手机首次接入后回补手机上仍可访问的历史。后续扫描根据未读提示和预览变化进入已知群，并向历史方向寻找上一次采集的重合序列。无法确认重合或历史不可访问时，标记采集缺口。业务读取进度由每个调用方按群独立保存。
 - 同一台手机逐条执行发送任务，不同手机可以并行。Web 和第三方使用同一套队列、幂等规则和回执。
@@ -13,7 +13,7 @@
 
 ## 安卓 APK 接口
 
-APK 启动时使用四项必填配置。首次启动填写，之后可使用已保存的配置重新连接。
+APK 启动时使用四项必填配置。首次启动填写，之后可使用已保存的配置重新连接。根据网关配置选择 HTTP 或 HTTPS。
 
 | 启动配置 | 用途 | 示例 |
 | --- | --- | --- |
@@ -30,11 +30,11 @@ APK 用 IP 和设备接入端口连接网关，再调用 `POST /v1/devices/sessi
 | --- | --- |
 | `POST /v1/devices/session` | 用注册 Key 验证 `client_id`，同时上报 APK 版本和能力。首次接入返回待审批，审批通过后返回 `device_session_id`、`lease_epoch`。 |
 | `POST /v1/devices/heartbeat` | 刷新在线状态。支持远程恢复的 APK 上报 `scan_paused`，领取 `resume_scan_id` 后核对原群草稿，并用 `resume_ack` 回执。 |
-| `GET /v1/devices/config` | 读取设备的配置版本、采集策略和已有群绑定。 |
-| `POST /v1/device-commands/claim` | 领取一条发送命令。返回 `command_id`、目标群和执行租约。无命令返回 `204`。读窗口由 APK 按配置和群未读状态主动采集。 |
+| `GET /v1/devices/config` | 返回 `config_revision` 和 `groups`，每个群包含绑定、采集状态和最近 12 条消息的对齐锚点 `head`。 |
+| `POST /v1/device-commands/claim` | 领取一条发送命令。请求体使用 `{"ready":true}` 表示可执行。返回 `command_id`、目标群和执行租约。无命令返回 `204`。读窗口由 APK 按配置和群未读状态主动采集。 |
 | `POST /v1/device-commands/{command_id}/renew` | 续租当前执行命令，维持原命令编号。 |
 | `POST /v1/device-commands/{command_id}/click-reservation` | 发送前核对目标群和正文摘要，为该命令预留一次点击。 |
-| `POST /v1/device-results` | 上报群发现、采集窗口、缺口和发送阶段或结果。采集带稳定的 `capture_id`，阶段事件带 `event_id`。分页回补用 `sweep_id` 和 `older_than` 串联窗口，最后一页上报 `complete`、`anchored` 或 `gap`。返回已持久化的编号，供手机确认和重传。 |
+| `POST /v1/device-results` | 上报群发现、采集窗口、缺口和发送阶段或结果。采集批次使用 `captures[].capture_id`（兼容 `captures[].id`），日志事件使用 `events[].id`，发送结果使用 `completion.id`（命令编号）和 `completion.event_id`。分页回补用 `sweep_id` 和 `older_than` 串联窗口，最后一页上报 `complete`、`anchored` 或 `gap`。返回已持久化的编号，供手机确认和重传。 |
 
 手机在发送前重新核对群名和绑定。点击意图先记录到本地，崩溃、断线或点击结果不明时进入待核对流程。同一命令重复投递时复用本地执行记录。
 
@@ -65,30 +65,54 @@ Web 页面包括群消息、设备管理和接口密钥管理。设备管理页�
 
 ## 第三方业务接口
 
-每个请求用 `Authorization: Bearer <接口 Key>` 鉴权。群列表只返回指定客户端下有权限查看的群。查单群、读消息、发送和查回执都使用路径中的客户端与群绑定。
+每个请求用 `Authorization: Bearer <接口 Key>` 鉴权。API 使用 Web 端口，对外部署时保留 Web URL 的完整路径前缀。查单群、读消息、查成员、发送和查回执都使用路径中的客户端与群绑定。发送 JSON 时带 `Content-Type: application/json`。
 
-| 方法和路径 | 用途 |
-| --- | --- |
-| `GET /v1/clients/{client_id}/groups` | 分页列出该客户端下有权限访问的群。 |
-| `GET /v1/clients/{client_id}/groups/{group_id}` | 查询群信息、最近同步时间、历史回补进度和采集缺口状态。 |
-| `GET /v1/clients/{client_id}/groups/{group_id}/messages/recent` | 取该群 `offset` 最大的 30 条，再按 `offset` 升序返回。 |
-| `GET /v1/clients/{client_id}/groups/{group_id}/messages?after_offset=130&limit=20` | 取该群 `offset > 130` 的消息，按 `offset` 升序返回，最多 20 条。 |
-| `POST /v1/clients/{client_id}/groups/{group_id}/send-requests` | 提交普通文字回复。 |
-| `POST /v1/clients/{client_id}/groups/{group_id}/alert-send-requests` | 提交结构化告警，网关校验并排版成群消息。 |
-| `GET /v1/clients/{client_id}/groups/{group_id}/send-requests/{task_id}` | 查询两类发送任务的状态和回执。 |
+| 方法和路径 | 所需权限 | 用途 |
+| --- | --- | --- |
+| `GET /v1/clients/{client_id}/groups` | `groups:read` | 分页列出该客户端下有权限访问的群。 |
+| `GET /v1/clients/{client_id}/groups/{group_id}` | `groups:read` | 查询单个群、同步时间、采集状态和可发送状态。 |
+| `GET /v1/clients/{client_id}/groups/{group_id}/messages/recent` | `messages:read` | 取该群最新 30 条已入库消息，按 `offset` 升序返回。 |
+| `GET /v1/clients/{client_id}/groups/{group_id}/messages?after_offset=130&limit=20` | `messages:read` | 取 `offset > 130` 的消息，升序返回，最多 20 条。 |
+| `GET /v1/clients/{client_id}/groups/{group_id}/members` | `members:read` | 读取该群已有的成员快照。 |
+| `POST /v1/clients/{client_id}/groups/{group_id}/send-requests` | `messages:send` | 提交普通文字回复。 |
+| `POST /v1/clients/{client_id}/groups/{group_id}/alert-send-requests` | `messages:send` | 提交结构化告警，网关校验并排版成群消息。 |
+| `GET /v1/clients/{client_id}/groups/{group_id}/send-requests/{task_id}` | `messages:send` | 查询该调用应用提交的发送任务及回执。 |
 
-两种消息接口均返回 `client_id`、`group_id`、`message_id`、`offset`、`sender` 和 `text`。最近 30 条用于快速展示。从头读取历史使用 `after_offset=0`。持续同步保存该群最后一条已处理的消息的 `offset`，空页保留原进度。
+### 查群和读取消息
+
+群列表的 `limit` 默认为 100，可取 1 至 200。响应包含 `groups` 和 `next_after_group_id`。翻页时将后者作为 `after_group_id` 传入，值为 `null` 时已到末页。群信息的 `history_status` 为 `pending`、`complete` 或 `gap`。`last_synced_at` 为 Unix 时间戳（秒），`routable` 表示手机最近一次上报时已确认群入口。
+
+持续消费时使用带 `after_offset` 和 `limit` 的增量接口。两个参数都必填，`limit` 可取 1 至 1000。首次从 `after_offset=0` 开始，每处理完一条就可以保存它的 `offset`。下一页继续使用最后处理的 offset，空页保留原进度。每个 `client_id + group_id` 单独保存进度。新消息和后来补采的历史消息都会取得更大的 offset。
+
+```bash
+# GATEWAY_API_KEY 为管理端生成的业务 Key。替换为自己的地址和客户端编号。
+BASE_URL="https://gateway.example.com/wx_msg_gateway"
+CLIENT_ID="phone-a"
+curl -fsS -H "Authorization: Bearer ${GATEWAY_API_KEY}" \
+  "$BASE_URL/v1/clients/$CLIENT_ID/groups?limit=50"
+
+# GROUP_ID 使用上一步返回的 group_id。
+GROUP_URL="$BASE_URL/v1/clients/$CLIENT_ID/groups/$GROUP_ID"
+curl -fsS -H "Authorization: Bearer ${GATEWAY_API_KEY}" \
+  "$GROUP_URL/messages?after_offset=0&limit=100"
+```
+
+两种消息接口都返回 `messages` 数组。发送人未识别时 `sender` 为 `null`。`observed_at` 是网关观测时间（Unix 秒），`backfilled` 为 `0` 或 `1`。
 
 ```json
 {
   "messages": [
     {
       "client_id": "phone-a",
-      "group_id": "grp_001",
-      "message_id": "msg_8f42",
+      "group_id": "a1b2c3d4e5f640078123456789abcdef",
+      "message_id": "bcdef123456740008123456789abcdef",
       "offset": 131,
       "sender": "值班员",
-      "text": "告警已恢复。"
+      "text": "告警已恢复。",
+      "direction": "incoming",
+      "observed_at": 1794033600.0,
+      "backfilled": 0,
+      "mention_self": "unknown"
     }
   ]
 }
@@ -96,7 +120,7 @@ Web 页面包括群消息、设备管理和接口密钥管理。设备管理页�
 
 ### 两类发送内容
 
-普通回复请求体只有 `text`。结构化告警首版必填如下。
+普通回复必填 `text`（最多 500 字符），可以按需带一个[原生提及参数](#原生提及成员)。结构化告警必填字段如下。
 
 | 字段 | 含义 |
 | --- | --- |
@@ -105,12 +129,12 @@ Web 页面包括群消息、设备管理和接口密钥管理。设备管理页�
 | `started_at` | 实际开始时间，包含时区。 |
 | `suggestion` | 处理建议。 |
 
-可选字段为 `severity`、`source`、`alert_id` 和 `detail`，分别表示级别、来源系统、告警事件编号和判断依据。需要发送恢复通知时，可用 `status` 区分触发与恢复，并通过 `recovered_at` 提供带时区的实际恢复时间。触发和恢复共用告警事件编号，各自使用独立的发送幂等标记。网关保存原始结构化字段和排版后的文字。
+可选字段为 `severity`、`source`、`alert_id` 和 `detail`，分别表示级别、来源系统、告警事件编号和判断依据。`status` 默认是 `triggered`。发送恢复通知时设为 `recovered`，并提供 `recovered_at`，其值不能早于 `started_at`。时间字段用带时区的 RFC 3339 格式。排版后的整条告警最多 500 字符。触发和恢复共用告警事件编号，各自使用独立的发送幂等标记。网关保存原始结构化字段和排版后的文字。
 
-两类接口都要求请求头 `Idempotency-Key`。Web 或第三方程序在创建发送请求时生成它。同一调用应用、客户端和群内，同一个 Key 与相同类型和内容的重试返回原任务。同一个 Key 搭配不同类型或内容返回 `409`。网关在首次受理时生成 `task_id`，返回 `202` 和任务状态。重试先查原任务，再决定是否入队。
+两类接口都要求请求头 `Idempotency-Key`。Web 或第三方程序为每个发送动作生成一个非空值，最多 128 字节。同一调用应用、客户端和群内，同一个 Key 与相同类型和内容的重试返回 `200` 和原任务。同一个 Key 搭配不同类型或内容返回 `409`。网关在首次受理时生成 `task_id`，返回 `202` 和任务状态。重试先查原任务，再决定是否入队。
 
 ```http
-POST /v1/clients/phone-a/groups/grp_001/alert-send-requests
+POST /v1/clients/phone-a/groups/a1b2c3d4e5f640078123456789abcdef/alert-send-requests
 Authorization: Bearer <接口 Key>
 Idempotency-Key: monitor:alarm-042:triggered
 Content-Type: application/json
@@ -137,7 +161,7 @@ Content-Type: application/json
 | `expired` | 等待领取超时。 |
 | `uncertain` | 进入点击阶段后无法确认结果。原任务保留待核对状态，后续回执或观测关联到原任务。 |
 
-回执包含 `task_id`、`status` 和结果说明。关联到群消息时附上 `message_id` 和 `offset`。正文和查询参数有误返回 `400`，Key 无效返回 `401`，权限不足返回 `403`，客户端、群或任务绑定不匹配返回 `404`。
+回执包含 `task_id`、`client_id`、`group_id`、`status`、`detail`、`created_at` 和 `expires_at`。尚未关联到出站消息时，`message_id` 和 `offset` 为 `null`。正文和查询参数有误返回 `400`，Key 无效返回 `401`，权限不足返回 `403`，客户端、群或任务绑定不匹配返回 `404`。
 
 原生提及任务确认后，网关使用申请点击许可时核对过的成员和正文，在同群中关联唯一的出站消息。群消息晚于回执入库时，后续查询可取得补齐的 `message_id` 和 `offset`。
 
@@ -148,7 +172,7 @@ Content-Type: application/json
 Web 在目标消息下点「回复并 @」，填正文后发送。网页自动带上原消息的 `message_id`。第三方从该群的最近消息或按 offset 读取接口取得 `message_id`，把它填入发送请求的 `mention_sender_of`。这个流程不需要同步群成员。
 
 ```bash
-GROUP_URL="https://<网关地址>/v1/clients/<client_id>/groups/<group_id>"
+GROUP_URL="$BASE_URL/v1/clients/$CLIENT_ID/groups/$GROUP_ID"
 curl -fsS -X POST "$GROUP_URL/send-requests" \
   -H "Authorization: Bearer ${GATEWAY_API_KEY}" \
   -H "Content-Type: application/json" -H "Idempotency-Key: reply-20261107-01" \
@@ -170,7 +194,7 @@ curl -fsS -X POST "$GROUP_URL/send-requests" \
 以下命令使用业务接口 Key，所选 `client_id + group_id` 须授权相应的 `members:read`、`messages:send` 或 `messages:read`。先在 Web 的「接口密钥」为业务方选择客户端、群和权限。
 
 ```bash
-GROUP_URL="https://<网关地址>/v1/clients/<client_id>/groups/<group_id>"
+GROUP_URL="$BASE_URL/v1/clients/$CLIENT_ID/groups/$GROUP_ID"
 curl -fsS -H "Authorization: Bearer ${GATEWAY_API_KEY}" "$GROUP_URL/members"
 ```
 

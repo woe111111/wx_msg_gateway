@@ -46,13 +46,16 @@
 
 ## 构建网关
 
-需要支持 Rust 2024 edition 及锁定依赖的 Rust 工具链，以及 C 编译工具。以下命令从项目根目录运行。
+需要支持 Rust 2024 edition 及锁定依赖的 Rust 工具链和 C 编译工具。首次启动用 OpenSSL 生成管理 Key。以下命令从项目根目录运行。
 
 ```sh
 cargo build --release --locked --manifest-path gateway/rust/Cargo.toml
 umask 077
 mkdir -p state
-python3 -c 'import json,secrets; print(json.dumps({"admin_token":secrets.token_urlsafe(32)}))' > state/gateway.json
+if [ ! -e state/gateway.json ]; then
+  admin_token=$(openssl rand -hex 32) &&
+    printf '{"admin_token":"%s"}\n' "$admin_token" > state/gateway.json
+fi
 ./gateway/rust/target/release/wecom-gateway --config state/gateway.json --host 127.0.0.1
 ```
 
@@ -71,18 +74,16 @@ adb install -r dist/wecom-web-probe.apk
 
 打开「企微网页收发」，开启该 App 的无障碍服务并填写网关地址、设备端口、客户端编号和注册 Key。提交接入申请后，在 Web 的「设备管理」通过审批。构建脚本生成本地调试签名，项目不分发签名密钥。
 
-`sh build.sh` 可构建单独的只读探针。普通微信的试验版及 Python 参考实现见部署说明。
-
 ## 接口与测试
 
-- [API 规范](API_SPEC.md)
+- [第三方业务接口](API_SPEC.md#第三方业务接口)
+- [安卓和 Web 管理接口](API_SPEC.md)
 - [设备执行协议](PROTOCOL.md)
-- `sh build.sh wecom-web` 同时运行 Android 界面提取、原生 @ 和恢复策略的回归测试。
-- Rust 网关集成测试使用临时 SQLite 数据库和模拟手机。
+
+`sh build.sh wecom-web` 同时运行 Android 界面提取、原生 @ 和恢复策略的回归测试。下方的集成测试启动已构建的 Rust 二进制，通过临时数据库和模拟手机验证接口。
 
 ```sh
-GATEWAY_TEST_BINARY="$PWD/gateway/rust/target/release/wecom-gateway" \
-  PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s gateway -v
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s gateway -v
 ```
 
 ## 许可证

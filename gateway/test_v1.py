@@ -6,10 +6,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 from tempfile import TemporaryDirectory
-import threading
 import unittest
-
-from server import make_server
 
 
 class MultiClientTest(unittest.TestCase):
@@ -18,22 +15,13 @@ class MultiClientTest(unittest.TestCase):
         self.addCleanup(work.cleanup)
         self.config = Path(work.name) / "gateway.json"
         self.config.write_text(json.dumps({"admin_token": "test-admin-key"}))
-        self.binary = os.environ.get("GATEWAY_TEST_BINARY")
-        self.port, self.device_port = self.start_binary(self.config) if self.binary else self.start_python(self.config)
+        default_binary = Path(__file__).resolve().parent / "rust/target/release/wecom-gateway"
+        self.binary = Path(os.environ.get("GATEWAY_TEST_BINARY", default_binary))
+        if not self.binary.is_file():
+            self.fail(f"请先构建 Rust 网关，或用 GATEWAY_TEST_BINARY 指定二进制路径：{self.binary}")
+        self.port, self.device_port = self.start_binary(self.config)
         self.admin = {"Authorization": "Bearer test-admin-key"}
         self.login()
-
-    def start_python(self, config):
-        server = make_server("127.0.0.1", 0, config)
-        self.python_server = server
-        self.addCleanup(server.gateway.db.close)
-        self.addCleanup(server.server_close)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(thread.join)
-        self.addCleanup(server.shutdown)
-        port = server.server_address[1]
-        return port, port
 
     def start_binary(self, config):
         process = subprocess.Popen([self.binary, "--host", "127.0.0.1", "--port", "0",
@@ -109,7 +97,6 @@ class MultiClientTest(unittest.TestCase):
         self.assertEqual(result["ack"], [capture_id])
         return result["bindings"]["同名群"]
 
-    @unittest.skipUnless(os.environ.get("GATEWAY_TEST_BINARY"), "Rust separates web and device listeners")
     def test_web_and_business_share_a_port_separate_from_device_api(self):
         self.assertNotEqual(self.port, self.device_port)
         status, html, _ = self.call("GET", "/", port=self.port)
@@ -136,7 +123,6 @@ class MultiClientTest(unittest.TestCase):
         self.assertEqual(self.request("GET", path, headers=third)["messages"][0]["text"], "设备端口采集")
         self.assertEqual(self.call("GET", path, headers=third, port=self.device_port)[0], 404)
 
-    @unittest.skipUnless(os.environ.get("GATEWAY_TEST_BINARY"), "Rust supports the public Web URL")
     def test_public_web_url_supports_nested_prefix(self):
         work = TemporaryDirectory()
         self.addCleanup(work.cleanup)
@@ -187,7 +173,6 @@ class MultiClientTest(unittest.TestCase):
         self.request("GET", messages_path, headers=third, expected=403)
         self.assertEqual(self.call("GET", groups_path, headers=third, port=self.device_port)[0], 404)
 
-    @unittest.skipUnless(os.environ.get("GATEWAY_TEST_BINARY"), "Rust exposes scan control")
     def test_web_requests_scan_resume_until_device_acknowledges(self):
         client = "paused-phone"
         device = self.register(client)
@@ -217,7 +202,6 @@ class MultiClientTest(unittest.TestCase):
         }, device))
         self.request("POST", control, {}, self.web, 409)
 
-    @unittest.skipUnless(os.environ.get("GATEWAY_TEST_BINARY"), "Rust persists Web sessions")
     def test_web_session_survives_gateway_restart_until_expired(self):
         original_cookie = self.web
         self.binary_process.terminate()
@@ -267,7 +251,6 @@ class MultiClientTest(unittest.TestCase):
         self.request("GET", sends+"/"+task["task_id"], headers=third, expected=401)
         self.assertEqual(self.request("GET", sends+"/"+task["task_id"], headers=self.web)["task_id"], task["task_id"])
 
-    @unittest.skipUnless(os.environ.get("GATEWAY_TEST_BINARY"), "Rust encrypts revealable keys")
     def test_api_key_reveal_is_explicit_and_persistent(self):
         self.register("show-key")
         issued = self.request("POST", "/v1/admin/api-keys", {
@@ -394,7 +377,6 @@ class MultiClientTest(unittest.TestCase):
         history = self.request("GET", path+"/send-requests", headers=self.web)["tasks"]
         self.assertEqual(history[0]["task_id"], task["task_id"])
 
-    @unittest.skipUnless(os.environ.get("GATEWAY_TEST_BINARY"), "Rust group identity contract")
     def test_group_count_change_preserves_binding_only_with_history_anchor(self):
         device = self.register("roster-change")
         self.approve(device, ["SEND_NATIVE_MENTION"])
@@ -429,7 +411,6 @@ class MultiClientTest(unittest.TestCase):
         }}, device)
         self.assertEqual(len(self.request("GET", path+"/members", headers=self.web)["members"]), 3)
 
-    @unittest.skipUnless(os.environ.get("GATEWAY_TEST_BINARY"), "Rust message sender mention contract")
     def test_reply_mentions_original_sender_without_member_snapshot(self):
         a, b = self.register("reply-a"), self.register("reply-b")
         self.approve(a, ["SEND_NATIVE_MENTION", "MENTION_MESSAGE_SENDER"])
@@ -469,7 +450,6 @@ class MultiClientTest(unittest.TestCase):
         self.assertTrue(self.request("POST", reservation, {**proof, "source_message_id": origin}, a)["may_click"])
         self.assertFalse(self.request("POST", reservation, {**proof, "source_message_id": origin}, a)["may_click"])
 
-    @unittest.skipUnless(os.environ.get("GATEWAY_TEST_BINARY"), "Rust native mention contract")
     def test_confirmed_mention_links_only_matching_outgoing_message(self):
         device = self.register("receipt-mention")
         self.approve(device, ["SEND_NATIVE_MENTION", "MENTION_MESSAGE_SENDER"])
@@ -500,7 +480,6 @@ class MultiClientTest(unittest.TestCase):
         self.assertEqual(receipt["message_id"], sent["message_id"])
         self.assertEqual(receipt["offset"], sent["offset"])
 
-    @unittest.skipUnless(os.environ.get("GATEWAY_TEST_BINARY"), "Rust native mention contract")
     def test_native_mentions_are_scoped_and_raw_text_does_not_mark_self(self):
         a, b = self.register("mention-a"), self.register("mention-b")
         for device in (a, b):
@@ -565,14 +544,7 @@ class MultiClientTest(unittest.TestCase):
         self.assertEqual(self.request("GET", path_a+"/send-requests/"+task_alert["task_id"],
                                       headers=third)["status"], "blocked")
 
-    @unittest.skipUnless(os.environ.get("GATEWAY_TEST_BINARY"), "需要 Rust 二进制来验证数据库切换")
-    def test_rust_opens_existing_python_gateway_database(self):
-        previous = TemporaryDirectory()
-        self.addCleanup(previous.cleanup)
-        config = Path(previous.name) / "gateway.json"
-        config.write_text(self.config.read_text())
-        self.port, self.device_port = self.start_python(config)
-        self.login()
+    def test_migrates_existing_gateway_database(self):
         device = self.register("existing-client")
         self.approve(device)
         messages = self.rows(["已有群消息"])
@@ -587,8 +559,25 @@ class MultiClientTest(unittest.TestCase):
         third = {"Authorization": "Bearer " + key, "Idempotency-Key": "previous-request"}
         previous_messages = self.request("GET", path+"/messages/recent", headers=third)["messages"]
         task = self.request("POST", path+"/send-requests", {"text": "待发送任务"}, third, 202)
-        self.python_server.shutdown()
-        self.port, self.device_port = self.start_binary(config)
+        self.binary_process.terminate()
+        self.binary_process.wait(5)
+        # Match the stored data and schema before Rust added these fields.
+        with sqlite3.connect(self.config.with_name("group-gateway-v1.sqlite3")) as db:
+            db.executescript("""
+                UPDATE api_keys SET key_ciphertext=NULL;
+                ALTER TABLE clients DROP COLUMN native_mentions;
+                ALTER TABLE clients DROP COLUMN mention_sender;
+                ALTER TABLE clients DROP COLUMN scan_paused;
+                ALTER TABLE clients DROP COLUMN resume_id;
+                ALTER TABLE clients DROP COLUMN resume_until;
+                ALTER TABLE messages DROP COLUMN mention_self;
+                ALTER TABLE tasks DROP COLUMN sent_text;
+                DROP TABLE web_sessions;
+                DROP TABLE member_snapshots;
+            """)
+        for row in previous_messages:
+            self.assertEqual(row.pop("mention_self"), "unknown")
+        self.port, self.device_port = self.start_binary(self.config)
         self.login()
         secret_path = f"/v1/admin/api-keys/{issued['key_id']}/secret"
         self.request("GET", secret_path, headers=self.web, expected=409)
