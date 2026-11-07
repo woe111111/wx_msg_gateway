@@ -11,6 +11,16 @@
 | Web 管理端 | 查看群消息与发送状态，回复并 @ 原发送人，管理设备和接口 Key |
 | 第三方 API | 按群读取最近消息或按 offset 增量读取，提交普通回复或结构化告警 |
 
+## 下载
+
+| 文件 | 用途 |
+| --- | --- |
+| [安卓 APK](https://github.com/woe111111/wx_msg_gateway/releases/latest/download/wecom-web-probe.apk) | 在值班手机上安装「企微网页收发」，最低支持 Android 7.1 |
+| [Linux x86_64 网关](https://github.com/woe111111/wx_msg_gateway/releases/latest/download/wecom-gateway-linux-x86_64) | 在 Linux 服务器上运行的 Rust 静态二进制 |
+| [SHA-256 校验文件](https://github.com/woe111111/wx_msg_gateway/releases/latest/download/SHA256SUMS) | 下载后用 `sha256sum -c SHA256SUMS` 校验两个文件 |
+
+各版本的下载和变更说明见 [GitHub Releases](https://github.com/woe111111/wx_msg_gateway/releases)。网关下载后执行 `chmod +x wecom-gateway-linux-x86_64`，再按 [部署说明](gateway/README.md) 配置和启动。
+
 ## 界面预览
 
 截图来自本地演示环境。群名、设备和消息均为示例，群编号已遮挡，密钥保持隐藏。
