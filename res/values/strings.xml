@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="service_description">只读采集指定企微群当前可见的普通文本消息，保存到手机本地。不发送、不上传。</string>
+</resources>

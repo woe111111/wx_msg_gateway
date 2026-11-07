@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>群消息网关</title>
+<style>
+:root{font:16px system-ui,sans-serif;color:#183129;background:#f0f5f2}
+body{max-width:1060px;margin:2rem auto;padding:0 1rem}
+header,nav,.row{display:flex;gap:.75rem;align-items:center;flex-wrap:wrap}
+header{justify-content:space-between;margin-bottom:1rem}
+h1,h2,h3{margin:.4rem 0 .8rem}
+section,aside,article{border:1px solid #d4e1da;border-radius:10px;background:#fff;padding:1rem}
+.grid{display:grid;grid-template-columns:minmax(160px,1fr) minmax(0,3fr);gap:1rem}
+button,input,textarea,select{font:inherit;padding:.45rem .65rem}
+button{border:1px solid #a7beb1;background:white;border-radius:6px;color:inherit}
+button[aria-current=true],button[type=submit]{background:#12694e;color:white}
+button:disabled{opacity:.5}
+label{display:grid;gap:.25rem;margin:.5rem 0}
+label.check{display:block}
+input,textarea,select{border:1px solid #a7beb1;border-radius:6px;min-width:0}
+textarea{width:100%;box-sizing:border-box}
+p,small,output{overflow-wrap:anywhere}
+output{display:block;padding:.5rem 0;white-space:pre-wrap}
+ul{padding-left:1.25rem}
+li{margin:.55rem 0}
+#groups{display:grid;gap:.4rem}
+#messages{max-height:52vh;overflow:auto;margin:.75rem 0}
+#messages p{white-space:pre-wrap;margin:.35rem 0}
+#messages article{border:none;border-bottom:1px solid #d4e1da;border-radius:0;padding:.6rem 0}
+.error{color:#9c2020}
+[hidden]{display:none!important}
+@media(max-width:660px){.grid{grid-template-columns:1fr}}
+</style>
+<header><h1>群消息网关</h1><nav aria-label="主导航" hidden id="nav">
+<button data-view="chat" aria-current="true">群消息</button>
+<button data-view="devices">设备管理</button>
+<button data-view="keys">接口密钥</button>
+</nav></header>
+<p id="notice" class="error" role="status"></p>
+<section id="login">
+<h2>后台登录</h2>
+<form id="login-form"><label>后台管理 Key<input type="password" name="key" required autocomplete="current-password"></label><button>登录</button></form>
+</section>
+<main id="main" hidden>
+<div id="chat" class="grid">
+<aside><label>客户端<select id="client"></select></label><h3>群聊</h3><div id="groups"></div></aside>
+<section>
+<h2 id="group-title">选择群聊</h2><small id="group-info"></small>
+<div id="messages" aria-live="polite"></div>
+<form id="send-form" hidden>
+<label>发送类型<select id="send-kind"><option value="send-requests">普通回复</option><option value="alert-send-requests">结构化告警</option></select></label>
+<div id="reply-fields"><label>回复正文<textarea name="text" rows="3" maxlength="500"></textarea></label></div>
+<div id="alert-fields" hidden>
+<label>SN<input name="sn"></label>
+<label>问题<input name="problem"></label>
+<label>开始时间（带时区）<input name="started_at" placeholder="2026-11-07T14:28:00+08:00"></label>
+<label>处理建议<textarea name="suggestion" rows="2"></textarea></label>
+<label>级别<input name="severity"></label>
+<label>来源<input name="source"></label>
+<label>告警编号<input name="alert_id"></label>
+<label>判断依据<textarea name="detail" rows="2"></textarea></label>
+<label>状态<select name="status"><option value="">触发</option><option value="recovered">恢复</option></select></label>
+<label>恢复时间（带时区）<input name="recovered_at"></label>
+</div>
+<div id="reply-target" hidden><span id="reply-recipient"></span> <button type="button" id="clear-reply">取消 @</button></div>
+<button type="submit" id="send">发送</button><output id="send-feedback"></output>
+</form><ul id="receipts"></ul>
+</section>
+</div>
+<section id="devices" hidden><h2>设备管理</h2>
+<form id="device-form"><label>Client ID<input name="client_id" required pattern="[A-Za-z0-9_\-]{1,64}"></label>
+<label>设备名称<input name="label" required></label><button type="submit">登记并生成注册 Key</button></form>
+<output id="device-secret"></output><ul id="device-list"></ul>
+</section>
+<section id="keys" hidden><h2>接口密钥</h2>
+<form id="key-form"><label>应用名称<input name="label" required></label>
+<div id="grant-clients"></div>
+<div class="row">
+<label class="check"><input type="checkbox" name="scope" value="groups:read" checked> 查群</label>
+<label class="check"><input type="checkbox" name="scope" value="messages:read"> 读消息</label>
+<label class="check"><input type="checkbox" name="scope" value="messages:send"> 发消息</label>
+<label class="check"><input type="checkbox" name="scope" value="members:read"> 查群成员</label>
+</div><button type="submit">生成接口 Key</button></form>
+<output id="api-secret"></output><ul id="api-list"></ul>
+</section>
+</main>
+<script>
+const el = id => document.getElementById(id);
+const statuses = {queued:"已排队",executing:"手机处理中",confirmed:"手机已读回",
+  observed:"后来扫描到出站消息",blocked:"已阻止",expired:"等待领取超时",uncertain:"结果待核对"};
+const historyLabels = {pending:"等待历史回补",complete:"已完成历史回补",gap:"采集有缺口"};
+const admissionLabels = {registered:"等待安卓申请",pending:"待审批",approved:"已通过",revoked:"已撤销"};
+const scopeLabels = {"groups:read":"查群","messages:read":"读消息","messages:send":"发消息","members:read":"查群成员"};
+let clients = [], clientId = "", groupId = "", view = "chat", refreshId = 0, attempted = null, submitting = false;
+let replyTarget = null;
+const base = client => "/v1/clients/"+encodeURIComponent(client)+"/groups";
+const groupPath = (client, group) => base(client)+"/"+encodeURIComponent(group);
+function item(tag, text) { const node = document.createElement(tag); node.textContent = text; return node; }
+function button(label, action) {
+  const node = item("button", label); node.type = "button";
+  node.onclick = () => handle(action); return node;
+}
+async function api(path, method="GET", body, headers={}) {
+  if (body !== undefined) headers = {...headers,"Content-Type":"application/json"};
+  const response = await fetch(path.slice(1), {method, headers, body:body === undefined ? undefined : JSON.stringify(body), cache:"no-store"});
+  const data = response.status===204 ? null : await response.json();
+  if (!response.ok) throw Object.assign(Error(data.error), {status:response.status});
+  return data;
+}
+async function handle(action) {
+  try { el("notice").textContent = ""; await action(); }
+  catch (error) { el("notice").textContent = error.message; if (error.status === 401) showLogin(); }
+}
+function showLogin() { el("login").hidden=false; el("main").hidden=true; el("nav").hidden=true; }
+function showMain() { el("login").hidden=true; el("main").hidden=false; el("nav").hidden=false; }
+async function loadClients() {
+  clients = (await api("/v1/admin/clients")).clients;
+  if (!clients.some(row => row.client_id===clientId)) {clientId=clients[0]?.client_id || ""; groupId="";}
+  const select = el("client");
+  select.replaceChildren(...clients.map(row => new Option(row.label+" · "+row.client_id+(row.online?" · 在线":" · 离线"),row.client_id)));
+  select.value=clientId;
+}
+async function listGroups(client) {
+  const groups=[]; let cursor="";
+  do {
+    const page=await api(base(client)+"?after_group_id="+encodeURIComponent(cursor));
+    groups.push(...page.groups); cursor=page.next_after_group_id;
+  } while(cursor);
+  return groups;
+}
+async function loadChat() {
+  const turn=++refreshId, client=clientId;
+  const groups=client ? await listGroups(client) : [];
+  if (turn!==refreshId || view!=="chat") return;
+  if (!groups.some(group=>group.group_id===groupId)) groupId=groups[0]?.group_id || "";
+  el("groups").replaceChildren(...groups.map(group=>{
+    const b=button(group.name, async()=>{groupId=group.group_id; el("send-form").reset(); clearReply(); updateSendKind(); el("send-feedback").textContent=""; await loadChat();});
+    b.setAttribute("aria-current",String(group.group_id===groupId)); return b;
+  }));
+  const group=groups.find(row=>row.group_id===groupId);
+  el("send-form").hidden=!group;
+  el("group-title").textContent=group?.name || "等待设备同步群聊";
+  el("group-info").textContent=group ? [group.client_id,group.group_id,historyLabels[group.history_status],
+    group.online?"设备在线":"设备离线",group.routable?"":"群入口待确认"].filter(Boolean).join(" · ") : "";
+  el("send").disabled=submitting || !group?.routable;
+  if (!group) {el("messages").replaceChildren();el("receipts").replaceChildren();return;}
+  const path=groupPath(client,group.group_id);
+  const [data, recentTasks]=await Promise.all([api(path+"/messages/recent"),api(path+"/send-requests")]);
+  if (turn!==refreshId || view!=="chat") return;
+  const messages=el("messages"), previous=messages.dataset.last;
+  messages.replaceChildren(...data.messages.map(message=>{
+    const article=item("article","");
+    const tag={direct:"@我",all:"@所有人",unknown:"提及状态未知"}[message.mention_self];
+    article.append(item("small",[(message.sender||"发送人未显示"),message.offset,tag].filter(Boolean).join(" · ")),
+      item("p",message.text));
+    if (group.mention_sender_supported && group.routable && message.direction==="incoming" && message.sender) {
+      article.append(button("回复并 @",()=>{
+        if (path!==groupPath(clientId,groupId)) return;
+        replyTarget={path,messageId:message.message_id};
+        el("send-kind").value="send-requests";updateSendKind();
+        el("reply-target").hidden=false;
+        el("reply-recipient").textContent="@"+message.sender+" · 原消息 #"+message.offset;
+        el("send-form").elements.text.focus();
+      }));
+    }
+    return article;
+  }));
+  messages.dataset.last=path+":"+String(data.messages.at(-1)?.offset || 0);
+  if (messages.dataset.last!==previous) messages.scrollTop=messages.scrollHeight;
+  el("receipts").replaceChildren(...recentTasks.tasks.map(task=>item("li",
+    (statuses[task.status] || task.status)+" · "+task.text+(task.detail?" · "+task.detail:""))));
+}
+async function showDevices() {
+  await loadClients();
+  el("device-list").replaceChildren(...clients.map(device=>{
+    const row=item("li",device.label+" · "+device.client_id+" · "+admissionLabels[device.admission]+" · "+(device.online?"在线":"离线")+" ");
+    if (device.status) row.append(item("p",device.status));
+    if (device.scan_paused===1 && device.online) {
+      const resume=button(device.resume_pending?"等待手机核对":"恢复扫描",async()=>{
+        if (!confirm("恢复后手机可能执行尚未过期的排队任务。继续？")) return;
+        await api("/v1/admin/clients/"+encodeURIComponent(device.client_id)+"/resume-scan","POST",{});
+        await showDevices();
+      });
+      resume.disabled=device.resume_pending;
+      row.append(resume);
+    }
+    if (device.admission==="pending") row.append(button("通过接入",async()=>{
+      await api("/v1/admin/clients/"+encodeURIComponent(device.client_id)+"/approve","POST",{});
+      await showDevices();
+    }));
+    row.append(button("轮换注册 Key", async()=>{
+      if (!confirm("轮换后此设备需要重新配对，继续？")) return;
+      const value=await api("/v1/admin/clients/"+encodeURIComponent(device.client_id)+"/key/rotate","POST",{});
+      el("device-secret").textContent="注册 Key（仅本次显示） "+value.registration_key; await showDevices();
+    }),button("撤销",async()=>{
+      if (!confirm("撤销这个设备的注册 Key？")) return;
+      await api("/v1/admin/clients/"+encodeURIComponent(device.client_id)+"/key","DELETE");
+      el("device-secret").textContent="";await showDevices();
+    }));return row;
+  }));
+}
+async function showKeys() {
+  await loadClients();
+  const all=await Promise.all(clients.map(async client=>[client,await listGroups(client.client_id)]));
+  const grantTargets=new Map(all.map(([client,groups])=>[client.client_id,{client,groups}]));
+  el("grant-clients").replaceChildren(...all.map(([client,groups])=>{
+    const set=item("fieldset","");set.dataset.client=client.client_id;set.append(item("legend",client.label+" · "+client.client_id));
+    for(const group of [{group_id:"*",name:"该客户端的全部群"},...groups]){
+      const label=item("label","");label.className="check";
+      const check=document.createElement("input");check.type="checkbox";check.value=group.group_id;
+      label.append(check,document.createTextNode(" "+group.name));set.append(label);
+    }return set;
+  }));
+  const {keys}=await api("/v1/admin/api-keys");
+  el("api-list").replaceChildren(...keys.map(key=>{
+    const row=item("li","");
+    row.append(item("strong",key.label),document.createTextNode(key.enabled?" · 有效":" · 已撤销"));
+    for (const grant of key.grants) {
+      const target=grantTargets.get(grant.client_id);
+      const client=target ? target.client.label+" · "+grant.client_id : grant.client_id;
+      const groups=grant.group_ids==="*" ? "全部群" : grant.group_ids.map(id=>
+        target?.groups.find(group=>group.group_id===id)?.name || "群 ID "+id).join("、");
+      const scopes=grant.scopes.map(scope=>scopeLabels[scope] || scope).join("、");
+      row.append(item("p",client+" ｜ 授权群 "+groups+" ｜ 权限 "+scopes));
+    }
+    const keyPath="/v1/admin/api-keys/"+encodeURIComponent(key.key_id);
+    const actions=item("div","");
+    actions.className="row";
+    const secret=item("output","");
+    secret.hidden=true;
+    if (key.revealable) {
+      actions.append(keyVisibilityButton(secret,async()=>(await api(keyPath+"/secret")).api_key));
+    } else if (key.enabled) {
+      actions.append(item("small","历史 Key 轮换后可查看"));
+    }
+    actions.append(button("轮换",async()=>{
+      if (!confirm("轮换这个接口 Key？")) return;
+      const value=await api(keyPath+"/rotate","POST",{});
+      showIssuedKey(value);await showKeys();
+    }));
+    if (key.enabled) {
+      actions.append(button("撤销",async()=>{
+        if (!confirm("撤销这个接口 Key？")) return;
+        await api(keyPath,"DELETE");
+        el("api-secret").textContent="";await showKeys();
+      }));
+    } else {
+      actions.append(button("删除",async()=>{
+        if (!confirm("永久删除已撤销的接口 Key「"+key.label+"」？")) return;
+        await api(keyPath+"/record","DELETE");
+        await showKeys();
+      }));
+    }
+    row.append(actions,secret);
+    return row;
+  }));
+}
+function keyVisibilityButton(output,readKey) {
+  const toggle=button("显示 Key",async()=>{
+    if (!output.hidden) {
+      output.hidden=true;
+      output.textContent="";
+      toggle.textContent="显示 Key";
+      return;
+    }
+    toggle.disabled=true;
+    try {
+      output.textContent=await readKey();
+      output.hidden=false;
+      toggle.textContent="隐藏 Key";
+    } finally {
+      toggle.disabled=false;
+    }
+  });
+  return toggle;
+}
+function showIssuedKey(value) {
+  const result=el("api-secret");
+  if (value.revealable) {
+    result.textContent="Key 已生成，可在下方列表点「显示 Key」查看。";
+  } else {
+    const secret=item("span","");
+    secret.hidden=true;
+    result.replaceChildren(keyVisibilityButton(secret,async()=>value.api_key),secret);
+  }
+}
+async function changeView(name) {
+  view=name;++refreshId;
+  for(const node of document.querySelectorAll("[data-view]"))node.setAttribute("aria-current",String(node.dataset.view===name));
+  for(const page of ["chat","devices","keys"])el(page).hidden=page!==name;
+  el("device-secret").textContent="";el("api-secret").textContent="";
+  if(name==="chat"){await loadClients();await loadChat();}
+  else if(name==="devices")await showDevices();
+  else await showKeys();
+}
+el("login-form").onsubmit=event=>{
+  event.preventDefault();handle(async()=>{
+    await api("/v1/admin/session","POST",{},{"Authorization":"Bearer "+event.currentTarget.elements.key.value});
+    el("login-form").reset();showMain();await changeView("chat");
+  });
+};
+document.querySelectorAll("[data-view]").forEach(node=>{node.onclick=()=>handle(()=>changeView(node.dataset.view));});
+el("client").onchange=()=>handle(async()=>{clientId=el("client").value;groupId="";el("send-form").reset();clearReply();updateSendKind();el("send-feedback").textContent="";await loadChat();});
+el("device-form").onsubmit=event=>{
+  event.preventDefault();const form=event.currentTarget;
+  handle(async()=>{
+    const result=await api("/v1/admin/clients","POST",Object.fromEntries(new FormData(form)));
+    el("device-secret").textContent="注册 Key（仅本次显示） "+result.registration_key;form.reset();await showDevices();
+  });
+};
+el("key-form").onsubmit=event=>{
+  event.preventDefault();const data=new FormData(event.currentTarget);
+  handle(async()=>{
+    const scopes=data.getAll("scope");
+    const grants=[...el("grant-clients").querySelectorAll("fieldset")].flatMap(field=>{
+      const ids=[...field.querySelectorAll("input:checked")].map(node=>node.value);
+      return ids.length?[{client_id:field.dataset.client,group_ids:ids.includes("*")?"*":ids,scopes}]:[];
+    });
+    const result=await api("/v1/admin/api-keys","POST",{label:data.get("label"),grants});
+    showIssuedKey(result);await showKeys();
+  });
+};
+function updateSendKind(){
+  const alert=el("send-kind").value==="alert-send-requests";
+  el("alert-fields").hidden=!alert;el("reply-fields").hidden=alert;
+  for(const field of el("alert-fields").querySelectorAll("input,textarea,select"))field.disabled=!alert;
+  el("reply-fields").querySelector("textarea").disabled=alert;
+}
+function clearReply(){
+  replyTarget=null;
+  el("reply-target").hidden=true;
+  el("reply-recipient").textContent="";
+}
+el("clear-reply").onclick=clearReply;
+el("send-kind").onchange=()=>{if(el("send-kind").value!=="send-requests")clearReply();updateSendKind();};
+updateSendKind();
+el("send-form").onsubmit=event=>{
+  event.preventDefault();
+  if(submitting||!clientId||!groupId)return;
+  const form=event.currentTarget, client=clientId, group=groupId, kind=el("send-kind").value;
+  const body=Object.fromEntries([...new FormData(form)].filter(([,value])=>value.trim()));
+  const groupUrl=groupPath(client,group);
+  if(replyTarget) {
+    if (replyTarget.path!==groupUrl || kind!=="send-requests") {
+      el("send-feedback").textContent="原消息与当前发送目标不匹配，请重新选择原消息";
+      return;
+    }
+    body.mention_sender_of=replyTarget.messageId;
+  }
+  const path=groupUrl+"/"+kind;
+  const signature=JSON.stringify([path,body]);
+  if(attempted?.signature!==signature)attempted={signature,key:crypto.randomUUID()};
+  const target=replyTarget;
+  submitting=true;el("send").disabled=true;
+  handle(async()=>{
+    try{
+      const task=await api(path,"POST",body,{"Idempotency-Key":attempted.key});
+      attempted=null;
+      if(client===clientId&&group===groupId && target===replyTarget){form.reset();clearReply();updateSendKind();el("send-feedback").textContent=statuses[task.status];}
+    }finally{submitting=false;await loadChat();}
+  });
+};
+(async()=>{
+  try{await loadClients();showMain();await loadChat();}
+  catch(error){if(error.status!==401)el("notice").textContent=error.message;}
+})();
+setInterval(()=>{
+  if(!el("main").hidden && view==="chat")handle(async()=>{await loadClients();await loadChat();});
+  if(!el("main").hidden && view==="devices")handle(showDevices);
+},3000);
+</script>

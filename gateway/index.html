@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>微信与企业微信群收发</title>
+<style>
+:root{font:16px system-ui,sans-serif;color:#152721;background:#eef4f1}
+body{max-width:1080px;margin:32px auto;padding:0 20px} h1{margin:0 0 12px}
+main{display:grid;grid-template-columns:225px minmax(0,1fr);gap:16px}
+aside,section{background:#fff;border:1px solid #d8e5de;border-radius:12px;padding:16px}
+#groups button{width:100%;text-align:left;margin:4px 0;padding:10px;background:#eef4f1;color:#183b2c;border:0;border-radius:6px;overflow-wrap:anywhere}
+#groups button[aria-current=true],#send{background:#11694d;color:white}
+#messages{min-height:260px;max-height:55vh;overflow:auto} article{padding:12px 0;border-bottom:1px solid #edf1ee}
+small,#status,#feedback{color:#53665e} article p{white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0}
+textarea{box-sizing:border-box;width:100%;padding:10px;font:inherit;border:1px solid #b4c7be;border-radius:6px}
+#send{border:0;border-radius:6px;padding:9px 16px;font:inherit} #send:disabled{opacity:.45}
+details{margin-top:16px;background:#fff;border:1px solid #d8e5de;border-radius:12px;padding:16px}
+#logs{max-height:240px;overflow:auto;font:13px ui-monospace,monospace;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere}
+@media(max-width:650px){main{grid-template-columns:1fr}}
+</style>
+<h1>微信与企业微信群收发</h1>
+<p id="status">等待手机连接</p>
+<main>
+<aside><strong>群聊</strong><div id="groups"></div></aside>
+<section>
+<h2 id="title">请选择群</h2><small id="group-id"></small>
+<div id="messages" aria-live="polite"></div>
+<form id="form"><label for="text">回复到选中的群</label>
+<textarea id="text" rows="3" maxlength="500" required></textarea>
+<button id="send" disabled>发送</button> <small id="feedback"></small><div><small id="send-status"></small></div></form>
+<div id="results"></div>
+</section>
+</main>
+<details open><summary>运行日志</summary><div id="logs">等待日志</div></details>
+<script>
+const el = id => document.getElementById(id);
+let selected = "", groups = [], previous = "", submitting = false, online = false;
+let pending = false, request = null, trackedSend = null;
+const platforms = {weixin:"微信",wecom:"企业微信"};
+const states = {queued:"已排队",claimed:"手机处理中",visible:"已在聊天区读回",
+  observed:"后续已读到匹配消息",blocked:"未完成",uncertain:"结果待核对",expired:"已超时"};
+function updateButton() {
+  const group = groups.find(g => g.id === selected);
+  const reason = !group ? "请先选择群" : !online ? "该平台手机未连接"
+    : !group.routable ? "等手机核对群入口后即可回复"
+    : pending ? "手机正在处理上一条回复" : "";
+  el("send").disabled = submitting || Boolean(reason);
+  el("send-status").textContent = reason;
+}
+async function refresh() {
+  const id = selected;
+  try {
+    const data = await (await fetch("/api/state?group_id="+encodeURIComponent(id),{cache:"no-store"})).json();
+    if (id !== selected) return;
+    groups = data.groups;
+    online = data.online;
+    el("logs").textContent=(data.logs || []).map(log=>new Date(log.created*1000).toLocaleTimeString()
+      +"  ["+log.source+"]  "+log.detail).join("\n") || "等待日志";
+    el("status").textContent = Object.entries(data.phones).map(([platform, phone])=>
+      platforms[platform]+" · "+(phone.online ? phone.status : "手机未连接")).join("　|　");
+    el("groups").replaceChildren(...groups.map(g=>{
+      const b=document.createElement("button");
+      b.textContent=platforms[g.platform]+" · "+g.name+(g.routable ? "" : " · 待定位");
+      b.setAttribute("aria-current", String(g.id===id));
+      b.onclick=()=>{if (selected!==g.id) {selected=g.id; online=false; updateButton(); el("text").value=""; trackedSend=null; el("feedback").textContent=""; previous=""; refresh();}};
+      return b;
+    }));
+    if (!selected && groups.length) {selected=groups[0].id; online=false; return refresh();}
+    const group=groups.find(g=>g.id===id);
+    el("title").textContent=group ? group.name : "等待同步群聊";
+    el("group-id").textContent=group ? platforms[group.platform]+" · 群编号 "+group.id : "";
+    const signature=JSON.stringify([id,data.messages]);
+    if(signature!==previous) {
+      previous=signature;
+      el("messages").replaceChildren(...data.messages.map(row=>{
+        const article=document.createElement("article"), name=document.createElement("strong"), body=document.createElement("p");
+        name.textContent=row.sender || "发送人未显示";
+        body.textContent=row.text;
+        article.append(name,body);
+        if(row.quality==="unlinked") {const tag=document.createElement("small");tag.textContent="与上次窗口未对齐";article.append(tag);}
+        return article;
+      }));
+      el("messages").scrollTop=el("messages").scrollHeight;
+    }
+    pending=data.sends.some(s=>s.state==="queued" || s.state==="claimed");
+    const latestReceipt=data.sends.find(s=>s.id===trackedSend);
+    if (latestReceipt) el("feedback").textContent=states[latestReceipt.state];
+    el("results").replaceChildren(...data.sends.slice(0,4).map(s=>{
+      const p=document.createElement("p"); p.textContent=states[s.state]+" · "+s.text+(s.detail?" · "+s.detail:""); return p;
+    }));
+  } catch(e) {online=false; el("status").textContent="本地服务暂不可用";}
+  finally {updateButton();}
+}
+el("form").onsubmit=async event=>{
+  event.preventDefault();
+  if(el("send").disabled) return;
+  const group_id=selected, text=el("text").value;
+  if(!request || request.text!==text || request.group_id!==group_id) request={group_id,text,request_id:crypto.randomUUID()};
+  submitting=true;trackedSend=null;updateButton();
+  try{
+    const response=await fetch("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(request)});
+    const data=await response.json();
+    if(!response.ok) throw Error(data.error);
+    if(selected===group_id && el("text").value===text) el("text").value="";
+    request=null;
+    if(selected===group_id) {
+      trackedSend=data.id;
+      el("feedback").textContent=states[data.state];
+    }
+    await refresh();
+  }catch(error){el("feedback").textContent=error.message;}
+  finally{submitting=false;updateButton();}
+};
+refresh();setInterval(refresh,1500);
+</script>
+</html>

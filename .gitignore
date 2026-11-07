@@ -1,0 +1,30 @@
+# Builds and local tool state
+/dist/
+/gateway/rust/target/
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store
+local.properties
+*.apk
+*.aab
+
+# Instance configuration, data and credentials
+/state/
+.private/
+.env
+.env.*
+gateway.json
+weixin-gateway.json
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.api-key-seal
+*.keystore
+*.jks
+*.p12
+*.pem
+*.key

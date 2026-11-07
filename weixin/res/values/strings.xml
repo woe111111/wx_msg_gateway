@@ -1,0 +1,3 @@
+<resources>
+    <string name="weixin_service_description">逐个打开微信会话中的群聊，同步可见文字到配对的本地网页，并执行该网页提交的发送任务。</string>
+</resources>
